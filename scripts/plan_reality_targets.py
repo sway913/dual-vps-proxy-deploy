@@ -7,7 +7,6 @@ import argparse
 import concurrent.futures
 import ipaddress
 import json
-import math
 import re
 import shutil
 import socket
@@ -25,20 +24,24 @@ from typing import Any
 
 DEFAULT_CANDIDATES = {
     "ingress": [
+        "www.amazon.com",
+        "www.ibm.com",
+        "www.tesla.com",
+        "www.samsung.com",
+        "www.oracle.com",
+        "www.intel.com",
         "hkust.edu.hk",
         "www.hku.hk",
         "www.cuhk.edu.hk",
         "www.polyu.edu.hk",
         "www.cityu.edu.hk",
-        "www.hkex.com.hk",
         "www.gov.hk",
     ],
     "exit": [
-        "apple.com",
-        "www.apple.com",
-        "www.microsoft.com",
         "www.amazon.com",
         "www.ibm.com",
+        "www.tesla.com",
+        "www.samsung.com",
         "www.oracle.com",
         "www.intel.com",
         "www.yahoo.com",
@@ -47,6 +50,12 @@ DEFAULT_CANDIDATES = {
 
 # REALITY 官方文档明确提示 Cloudflare 一类特殊 CDN 目标可能形成转发风险。
 RISK_ASNS = {13335: "Cloudflare"}
+# 地区性教育/政府站点可能在 VPS 所在网络上短时低延迟，却依赖单一地区路由。
+# 它们仍显示在报告中，但不能仅凭一次规划自动采用。
+STABILITY_RISK_SUFFIXES = {
+    ".edu.hk": "香港教育网/高校路由依赖",
+    ".gov.hk": "香港地区政府网络依赖",
+}
 ROLE_ALIASES = {
     "ingress": "ingress",
     "入口": "ingress",
@@ -215,6 +224,7 @@ def probe_candidate(
     domain: str,
     probes: int,
     timeout: float,
+    probe_interval: float,
     host_asns: set[int],
     xray: str | None,
 ) -> dict[str, Any]:
@@ -229,6 +239,7 @@ def probe_candidate(
         "tls13": False,
         "same_asn": False,
         "risk": "",
+        "stability_risk": "",
         "qualified": False,
         "score": 0.0,
         "error": "",
@@ -263,6 +274,8 @@ def probe_candidate(
             sans.update(sample["sans"])
         except (OSError, ssl.SSLError, socket.gaierror) as exc:
             result["error"] = str(exc)
+        if probe_interval and index + 1 < probes:
+            time.sleep(probe_interval)
     result["alpn"] = sorted(alpns)
     result["tls13"] = tls13 and result["successes"] > 0
     result["certificate_sans"] = sorted(sans)
@@ -282,10 +295,14 @@ def probe_candidate(
     risky = sorted(target_asns & set(RISK_ASNS))
     if risky:
         result["risk"] = ", ".join(f"AS{asn} {RISK_ASNS[asn]}" for asn in risky)
+    for suffix, reason in STABILITY_RISK_SUFFIXES.items():
+        if domain.endswith(suffix):
+            result["stability_risk"] = reason
+            break
 
     xray_result = xray_tls_ping(xray, domain, timeout)
     result["xray_tls_ping"] = xray_result
-    required_successes = math.ceil(probes * 2 / 3)
+    required_successes = probes
     xray_ok = not xray_result.get("available") or (
         xray_result.get("sni_ok") and xray_result.get("tls13")
     )
@@ -293,9 +310,9 @@ def probe_candidate(
         result["successes"] >= required_successes and result["tls13"] and xray_ok
     )
 
-    score = 40.0 * result["successes"] / probes
+    score = 50.0 * result["successes"] / probes
     if result["same_asn"]:
-        score += 30.0
+        score += 3.0
     if "h2" in alpns:
         score += 10.0
     if result["latencies_ms"]:
@@ -304,19 +321,21 @@ def probe_candidate(
         score += max(0.0, 20.0 - median_ms / 25.0)
     else:
         result["median_latency_ms"] = None
-    if xray_result.get("post_quantum"):
-        score += 5.0
+    if xray_result.get("sni_ok") and xray_result.get("tls13"):
+        score += 10.0
     if result["risk"]:
-        score -= 50.0
+        score -= 100.0
+    if result["stability_risk"]:
+        score -= 60.0
     if not result["qualified"]:
         score -= 100.0
     result["score"] = round(score, 1)
     if not result["qualified"]:
         result["verdict"] = "不合格"
-    elif result["risk"]:
+    elif result["risk"] or result["stability_risk"]:
         result["verdict"] = "风险目标"
     elif result["same_asn"]:
-        result["verdict"] = "优先推荐"
+        result["verdict"] = "可用（同ASN）"
     else:
         result["verdict"] = "可用"
     return result
@@ -337,7 +356,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate", action="append", default=[], help="追加候选域名，可重复")
     parser.add_argument("--candidate-file", help="候选文件，每行一个域名，# 开头为注释")
     parser.add_argument("--no-defaults", action="store_true", help="不加载角色默认候选")
-    parser.add_argument("--probes", type=int, default=3, help="每个候选的 TLS 探测次数")
+    parser.add_argument("--probes", type=int, default=6, help="每个候选的 TLS 探测次数，默认 6")
+    parser.add_argument(
+        "--probe-interval",
+        type=float,
+        default=2.0,
+        help="同一候选两次探测之间的秒数，默认 2",
+    )
     parser.add_argument("--timeout", type=float, default=6.0, help="单次网络操作超时秒数")
     parser.add_argument("--san-limit", type=int, default=12, help="从证书 SAN 扩展的候选上限")
     parser.add_argument("--workers", type=int, default=4, help="并发探测数，默认 4")
@@ -354,6 +379,9 @@ def main() -> int:
         return 2
     if args.probes < 1 or args.probes > 10:
         print("--probes 必须在 1 到 10 之间", file=sys.stderr)
+        return 2
+    if args.probe_interval < 0 or args.probe_interval > 30:
+        print("--probe-interval 必须在 0 到 30 之间", file=sys.stderr)
         return 2
     if args.workers < 1 or args.workers > 16:
         print("--workers 必须在 1 到 16 之间", file=sys.stderr)
@@ -397,13 +425,23 @@ def main() -> int:
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
         futures = [
             executor.submit(
-                probe_candidate, domain, args.probes, args.timeout, host_asns, xray
+                probe_candidate,
+                domain,
+                args.probes,
+                args.timeout,
+                args.probe_interval,
+                host_asns,
+                xray,
             )
             for domain in candidates
         ]
         results = [future.result() for future in futures]
     results.sort(key=lambda item: (item["score"], item["domain"]), reverse=True)
-    selectable = [item for item in results if item["qualified"] and not item["risk"]]
+    selectable = [
+        item
+        for item in results
+        if item["qualified"] and not item["risk"] and not item["stability_risk"]
+    ]
     selected = selectable[0] if selectable else None
     payload = {
         "role": role,
@@ -411,8 +449,10 @@ def main() -> int:
         "host_asns": sorted(host_asns),
         "host_asn_holders": host_holders,
         "xray": xray,
-        "selected_target": f"{selected['domain']}:443" if selected else None,
+        "provisional_target": f"{selected['domain']}:443" if selected else None,
         "server_name": selected["domain"] if selected else None,
+        "selection_status": "provisional_requires_reality_e2e" if selected else None,
+        "requires_reality_e2e": True,
         "results": results,
     }
 
@@ -435,7 +475,8 @@ def main() -> int:
             )
             target_asn = ",".join(f"AS{asn}" for asn in item["target_asns"]) or "未知"
             alpn = ",".join(item["alpn"]) or "-"
-            risk = f"({item['risk']})" if item["risk"] else ""
+            risks = [value for value in (item["risk"], item["stability_risk"]) if value]
+            risk = f"({'; '.join(risks)})" if risks else ""
             print(
                 f"{item['score']:.1f}\t{item['verdict']}{risk}\t"
                 f"{item['successes']}/{item['probes']}\t{latency}\t"
@@ -443,12 +484,14 @@ def main() -> int:
             )
         print()
         if selected:
-            print(f"SELECTED_TARGET={selected['domain']}:443")
+            print(f"PROVISIONAL_TARGET={selected['domain']}:443")
             print(f"SERVER_NAME={selected['domain']}")
             print(f"SELECTED_SCORE={selected['score']:.1f}")
             print(f"SELECTED_VERDICT={selected['verdict']}")
+            print("REALITY_E2E_REQUIRED=true")
+            print("该结果只是候选；真实 VLESS/Reality RAW 与 XHTTP 外部验收通过后才能采用。")
         else:
-            print("没有通过硬性检查且可自动采用的候选目标。", file=sys.stderr)
+            print("没有可进入真实端到端验证的候选目标。", file=sys.stderr)
 
     return 0 if selected else 1
 

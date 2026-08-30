@@ -23,9 +23,23 @@ python3 plan_reality_targets.py exit --xray /usr/local/bin/xray
 ```
 
 - 第一条必须在入口机本机运行，第二条必须在出口机本机运行。
-- 保存每台机器的 `SELECTED_TARGET` 和 `SERVER_NAME`。
-- 若脚本未给出可自动采用结果，补充本地区域候选后重新运行。
-- 入口机两个公共 Reality 入站使用入口机选择结果；出口机两个公共入站和机间入站使用出口机选择结果。
+- 保存每台机器的 `PROVISIONAL_TARGET` 和 `SERVER_NAME`；它们还不是最终结果。
+- 若脚本未给出临时候选，补充全球分布、长期稳定的候选后重新运行。
+- 地区性教育/政府站点即使延迟最低也不得自动采用；优先测试全球分布、长期稳定的候选。
+
+为排名靠前的候选生成临时服务端和客户端配置，临时入口不得加入订阅。从另一台 VPS 或用户网络分别验证真实 RAW 与 XHTTP：
+
+```bash
+python3 scripts/verify_reality_e2e.py \
+  --xray /usr/local/bin/xray \
+  --config /run/reality-candidate-client.json \
+  --probe '入口RAW=39081=<入口机IP>' \
+  --probe '入口XHTTP=39082=<入口机IP>'
+```
+
+首次五轮全部通过后继续其他部署准备，至少五分钟后用全新连接再运行一次。两阶段均通过，才将候选确定为入口机或出口机的正式目标。`xray tls ping`、普通 HTTPS 成功或短暂代理成功都不能替代此步骤。
+
+入口机两个公共 Reality 入站使用入口机最终结果；出口机两个公共入站和机间入站使用出口机最终结果。
 
 ## 3. 生成部署凭据
 
@@ -87,6 +101,7 @@ http://<入口机IP>:36010/<随机令牌>/all.txt
 4. 解码 `all.txt`，确认六个 VLESS、一个 Hysteria2、一个 AnyTLS URI。
 5. 两个正式 URL 均返回 HTTP 200。
 6. 订阅目录无法列目录，也无法访问服务端配置和私钥。
+7. `target`/`dest`、`serverNames`、Clash `servername`、Base64 分享 URI 的 `sni` 和本地凭据描述中的目标域名完全一致。
 
 ## 7. 端到端验收
 
@@ -113,6 +128,8 @@ http://<入口机IP>:36010/<随机令牌>/all.txt
 - 两个订阅均能导入，服务重启后节点仍可用。
 
 若出现短暂成功后失败，必须重复外部测试并检查日志、防火墙、内存和连接资源，不能直接归因于客户端。
+
+Reality 目标故障或更换时，严格执行 [reality-target-lifecycle.md](reality-target-lifecycle.md) 的原子同步与回滚流程；只改服务端或只改订阅都会使节点继续超时。
 
 ## 8. 交付
 

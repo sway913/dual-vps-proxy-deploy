@@ -45,13 +45,15 @@
 
 目标选择必须在对应 VPS 本机进行。使用 [官方 REALITY 配置文档](https://xtls.github.io/config/transports/reality.html) 约束自动规划：
 
-1. 从入口或出口角色的种子候选开始，并从成功证书的精确 SAN 中扩展候选。
-2. 每个候选至少执行三次 TLS 1.3 握手；证书链、主机名和 SNI 必须通过系统 CA 校验。
+1. 从全球分布、长期稳定的站点开始，并从成功证书的精确 SAN 中扩展候选。地区性高校、教育网和政府站点只能人工复核，不能自动采用。
+2. 每个候选默认执行六次 TLS 1.3 握手，探测之间留出间隔；证书链、主机名和 SNI 必须通过系统 CA 校验，六次必须全部成功。
 3. 记录 ALPN、握手成功率、中位延迟、解析 IPv4 和目标 ASN。
 4. 若 Xray 已安装，调用 `xray tls ping` 复核带 SNI 的握手、TLS 1.3 和 X25519MLKEM768 支持情况。
-5. 与 VPS 同 ASN 的合格目标优先；其次选择低延迟、稳定且不属于风险 CDN ASN 的目标。
+5. 稳定性优先于同 ASN 或最低延迟；同 ASN 只能作为弱参考，不能压过跨时间成功率和真实代理结果。
 6. Cloudflare ASN 目标标记为风险项，不自动采用，避免未认证 REALITY 流量把服务器变成 CDN 转发入口。
 7. `serverNames` 只写入已逐个完成 SNI 和证书验证的域名，不直接把证书中的所有 SAN 批量加入配置。
+8. 规划脚本的第一名只是临时候选。必须从另一台 VPS 或用户网络，以真实 VLESS/Reality RAW 和 XHTTP 客户端分别建立至少五次新连接，并核对实际出口 IP。
+9. 完成其他部署步骤后至少间隔五分钟复测同一候选；两阶段全部通过才可写入正式订阅。
 
 运行方式：
 
@@ -60,7 +62,7 @@ python3 scripts/plan_reality_targets.py ingress
 python3 scripts/plan_reality_targets.py exit
 ```
 
-脚本输出排序表、自动选择结果及 JSON 模式。若没有可自动采用的候选，停止配置并补充候选域名；不能静默退回固定目标。
+脚本输出排序表、临时候选及 JSON 模式，不输出可跳过真实验收的最终结论。若没有候选通过硬性检查，停止配置并补充候选域名；不能静默退回固定目标。详细流程见 [reality-target-lifecycle.md](reality-target-lifecycle.md)。
 
 ## 服务划分
 
