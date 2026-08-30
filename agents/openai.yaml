@@ -1,0 +1,6 @@
+interface:
+  display_name: "双机代理部署"
+  short_description: "在两台全新服务器上部署并验收香港入口美国出口八节点代理方案"
+  default_prompt: "Use $dual-vps-proxy-deploy to deploy and verify the final eight-node proxy architecture on two fresh VPS hosts."
+policy:
+  allow_implicit_invocation: true
